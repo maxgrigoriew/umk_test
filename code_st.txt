@@ -1,0 +1,126 @@
+PROGRAM PLC_PRG
+VAR
+    // Входы
+    Start   : BOOL;   // Пуск/Стоп алгоритма
+    L1      : BOOL;   // Верхний уровень
+    L2      : BOOL;   // Нижний уровень
+
+    // Выходы 
+    V1      : BOOL;   // Клапан воды
+    V2      : BOOL;   // Клапан щелочи
+    H1      : BOOL;   // Насос
+
+    Err_V1  : BOOL;   // Ошибка клапана V1
+    Err_H1  : BOOL;   // Ошибка насоса H1
+
+    // Внутренние переменные 
+    Step        : E_Step := E_Step.STOPPED; 
+    Run         : BOOL := FALSE;
+
+    RtStart     : R_TRIG;
+    FtStart     : F_TRIG;
+
+    T_Fill      : TON;   // Контроль заполнения 10 сек
+    T_Alkali    : TON;   // Подача щелочи 7 сек
+    T_Drain     : TON;   // Контроль опустошения 8 сек
+END_VAR
+
+// Детекторы фронтов
+RtStart(CLK := Start);
+FtStart(CLK := Start);
+
+
+// Пуск по переднему фронту
+IF RtStart.Q THEN
+    Run := TRUE;
+    Step := E_Step.FILL_WATER;
+
+    // сброс ошибок при повторном старте
+    Err_V1 := FALSE;
+    Err_H1 := FALSE;
+END_IF;
+
+
+// ===== Останов по заднему фронту =====
+IF FtStart.Q THEN
+    Run := FALSE;
+    Step := E_Step.STOPPED;
+END_IF;
+
+// Принудительное переключение датчика L2 = TRUE, тк датчик L1 = true (Для визуализации)
+IF L1 THEN
+	L2 := TRUE;
+END_IF
+
+// Состояние "всё выключено" по умолчанию
+V1 := FALSE;
+V2 := FALSE;
+H1 := FALSE;
+
+// Если есть авария - полная остановка
+IF Err_V1 OR Err_H1 THEN
+    Run := FALSE;
+    Step := E_Step.STOPPED;
+END_IF;
+
+
+// ===== Основной алгоритм =====
+IF Run THEN
+    CASE Step OF
+
+        // Этап 1. Заполнение водой до L1
+        E_Step.FILL_WATER:
+            V1 := TRUE;
+            T_Fill(IN := TRUE, PT := T#10S);
+
+            IF L1 THEN
+                V1 := FALSE;
+                T_Fill(IN := FALSE);
+                Step := E_Step.FILL_ALKALI;
+            ELSIF T_Fill.Q THEN
+                V1 := FALSE;
+                T_Fill(IN := FALSE);
+                Err_V1 := TRUE;
+                Run := FALSE;
+                Step := E_Step.STOPPED;
+            END_IF;
+
+        // Этап 2. Добавление щелочи 7 сек
+        E_Step.FILL_ALKALI:
+            V2 := TRUE;
+            T_Alkali(IN := TRUE, PT := T#7S);
+
+            IF T_Alkali.Q THEN
+                V2 := FALSE;
+                T_Alkali(IN := FALSE);
+                Step := E_Step.DRAIN_TANK;
+            END_IF;
+
+        // Этап 3. Опустошение бака до уровня ниже L2
+
+	  E_Step.DRAIN_TANK:
+			H1 := TRUE;
+			T_Drain(IN := TRUE, PT := T#8S);
+
+		  IF NOT L2 THEN
+			H1 := FALSE;
+			T_Drain(IN := FALSE);
+			Step := E_Step.STOPPED;
+			ELSIF T_Drain.Q THEN
+				H1 := FALSE;
+				T_Drain(IN := FALSE);
+				Err_H1 := TRUE;
+				Run := FALSE;
+				Step := E_Step.STOPPED;
+			END_IF;
+
+        ELSE
+            Step := E_Step.STOPPED;
+    END_CASE;
+
+ELSE
+    // Когда алгоритм остановлен - обязательно сбрасываем таймеры
+    T_Fill(IN := FALSE);
+    T_Alkali(IN := FALSE);
+    T_Drain(IN := FALSE);
+END_IF;
